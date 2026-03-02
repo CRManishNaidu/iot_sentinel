@@ -1,7 +1,52 @@
+"""
+IoT Sentinel - Data Pipeline
+=============================
+
+Dataset Strategy:
+    Source: CTU-IoT-23 dataset (Czech Technical University, Stratosphere Lab)
+    URL:    https://www.stratosphereips.org/datasets-iot23
+
+    Two captures are combined to build a balanced training corpus:
+
+    1. CTU-Honeypot-Capture-4-1 (benign baseline)
+       - IoT honeypot traffic representing normal smart-home device behavior
+       - Includes DNS lookups, HTTP API calls, NTP sync, SSDP discovery
+
+    2. CTU-IoT-Malware-Capture-1-1 (malware traffic)
+       - Contains real Mirai botnet traffic: C2 beaconing, scanning, DDoS,
+         credential brute-forcing, and propagation attempts
+
+    Why this dataset:
+       - Captures REAL IoT malware behavior (not synthetic)
+       - Zeek/Bro conn.log format matches our feature extraction pipeline
+       - Widely cited in IoT security research (100+ papers)
+       - Contains both benign and malicious IoT traffic with per-flow labels
+
+    Class distribution (after processing):
+       - Benign (0):    ~70% (~707,000 flows)
+       - Malicious (1): ~30% (~302,000 flows)
+       - Total:         1,009,200 flows
+
+    Imbalance handling:
+       - We use unsupervised Isolation Forest (contamination=0.01)
+       - The model learns data density, NOT decision boundaries
+       - Labels (binary_label) are DROPPED before training
+       - Labels are retained in the CSV for offline validation only
+
+    Features (21 total):
+       - 7 continuous: duration, orig_bytes, resp_bytes, orig_pkts, resp_pkts,
+                       bytes_per_second (engineered), packet_ratio (engineered)
+       - 3 one-hot protocol: proto_icmp, proto_tcp, proto_udp
+       - 11 one-hot connection state: conn_state_OTH, ..., conn_state_SH
+
+    See docs/DATASET_STRATEGY.md for full rationale and validation approach.
+"""
+
 import pandas as pd
 import numpy as np
 import os
 import logging
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -225,12 +270,13 @@ def encode_categorical_after_merge(df, categorical_cols=None):
 
 def main():
     """Main execution function."""
-    # File paths
-    honeypot_path = r'C:\Users\manis\Documents\Projects\5 - IOT\iot_sentinel\data\raw\CTU-Honeypot-Capture-4-1\bro\conn.log.labeled'
-    malware_path = r'C:\Users\manis\Documents\Projects\5 - IOT\iot_sentinel\data\raw\CTU-IoT-Malware-Capture-1-1\bro\conn.log.labeled'
+    # File paths (relative to project root)
+    project_root = Path(__file__).resolve().parent.parent
+    honeypot_path = project_root / 'data' / 'raw' / 'CTU-Honeypot-Capture-4-1' / 'bro' / 'conn.log.labeled'
+    malware_path = project_root / 'data' / 'raw' / 'CTU-IoT-Malware-Capture-1-1' / 'bro' / 'conn.log.labeled'
     
     # Output path
-    output_dir = r'C:\Users\manis\Documents\Projects\5 - IOT\iot_sentinel\data\processed'
+    output_dir = project_root / 'data' / 'processed'
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, 'iot23_processed.csv')
     

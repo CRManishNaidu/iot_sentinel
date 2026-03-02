@@ -26,6 +26,18 @@ import atexit
 import sys
 import os
 
+# Configure module-level logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+# Add a rotating file handler so dashboard errors are persisted
+_log_handler = RotatingFileHandler("dashboard.log", maxBytes=5_000_000, backupCount=3)
+_log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+logger.addHandler(_log_handler)
+# Also log to console
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logger.addHandler(_console_handler)
+
 # =============================================================================
 # WINDOWS CONSOLE UTF-8 FIX
 # =============================================================================
@@ -119,16 +131,35 @@ class WebSocketManager:
         self.ws = None
         self._stop_event = threading.Event()
         self._thread = None
-        # ADD THESE TWO LINES:
         self._connection_in_progress = False
         self._connection_lock = threading.Lock()
+        
+        # Small delay before starting connection to prevent multiple
+        # threads from starting simultaneously during Streamlit reruns
+        time.sleep(0.1)
         self._start_connection()
     
     def _start_connection(self):
         with self._connection_lock:
             if self._connection_in_progress or (self._thread and self._thread.is_alive()):
                 return
+            
+            # Check if we're in a cooldown period (exponential backoff)
+            if self.reconnect_attempts > 0:
+                # Exponential backoff: 3, 6, 12, 24, 48, ... up to MAX_BACKOFF_SECONDS
+                backoff = min(
+                    self.reconnect_delay * (2 ** (self.reconnect_attempts - 1)),
+                    DASHBOARD_CONFIG.MAX_BACKOFF_SECONDS
+                )
+                if time.time() - self.last_reconnect_time < backoff:
+                    logger.debug(
+                        f"Skipping reconnect - in backoff period "
+                        f"({backoff:.0f}s, attempt {self.reconnect_attempts})"
+                    )
+                    return
+            
             self._connection_in_progress = True
+            self.last_reconnect_time = time.time()
 
         def run_websocket():
             url = API_CONFIG.WS_URL
@@ -357,6 +388,49 @@ def style_verdict_column(df: pd.DataFrame, verdict_column: str = 'Verdict'):
         return df.style.map(verdict_style, subset=[verdict_column])
     except Exception:
         return df
+
+def check_websocket_health():
+    """Check if WebSocket is connected and reconnect if needed, but not too frequently."""
+    ws_manager = st.session_state.ws_manager
+    
+    # Only attempt reconnect if we're not already connected and not in cooldown
+    if not ws_manager.is_connected():
+        last_attempt = st.session_state.get('last_ws_reconnect_attempt', 0)
+        now = time.time()
+        
+        # Don't attempt reconnect more than once every 10 seconds
+        if now - last_attempt > 10:
+            st.session_state.last_ws_reconnect_attempt = now
+            logger.info("WebSocket disconnected - attempting reconnect")
+            # Force reconnect by reinitializing
+            ws_manager.stop()
+            # Reset singleton so a fresh instance is created
+            WebSocketManager._instance = None
+            WebSocketManager._lock = threading.Lock()
+            st.session_state.ws_manager = WebSocketManager()
+
+def render_connection_status():
+    """Render WebSocket connection status in sidebar."""
+    ws_manager = st.session_state.ws_manager
+    status_color = "🟢" if ws_manager.is_connected() else "🔴"
+    status_text = "Connected" if ws_manager.is_connected() else "Disconnected"
+    
+    st.sidebar.markdown(f"**WebSocket:** {status_color} {status_text}")
+    
+    if not ws_manager.is_connected():
+        if ws_manager.reconnect_attempts > 0:
+            st.sidebar.info(
+                f"Reconnecting... (attempt {ws_manager.reconnect_attempts}"
+                f"/{ws_manager.max_reconnect_attempts})"
+            )
+        
+        # Add manual reconnect button
+        if st.sidebar.button("🔄 Reconnect Now"):
+            ws_manager.stop()
+            WebSocketManager._instance = None
+            WebSocketManager._lock = threading.Lock()
+            st.session_state.ws_manager = WebSocketManager()
+            st.rerun()
 
 def process_websocket_messages() -> List[Dict[str, Any]]:
     if st.session_state.paused or not st.session_state.ws_manager.is_connected():
@@ -779,6 +853,9 @@ def main():
             limit=100000
         )
     
+    # Check WebSocket health and reconnect if needed (rate-limited)
+    check_websocket_health()
+    
     # Process messages
     process_websocket_messages()
     
@@ -893,6 +970,17 @@ def main():
             reconnect_info = f" (attempt {ws_manager.reconnect_attempts}/{ws_manager.max_reconnect_attempts})"
         
         st.markdown(f"**WebSocket:** {ws_status}{reconnect_info}")
+        
+        # Manual reconnect button when disconnected
+        if not ws_manager.is_connected():
+            if ws_manager.reconnect_attempts > 0:
+                st.info(f"Auto-reconnecting with backoff...")
+            if st.button("🔄 Reconnect Now", use_container_width=True):
+                ws_manager.stop()
+                WebSocketManager._instance = None
+                WebSocketManager._lock = threading.Lock()
+                st.session_state.ws_manager = WebSocketManager()
+                st.rerun()
         
         if ws_manager.last_successful_connection:
             last_conn = ws_manager.last_successful_connection.strftime('%H:%M:%S')

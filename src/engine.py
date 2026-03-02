@@ -168,8 +168,7 @@ class Engine:
             return float(np.clip(ml_score, 0, 100))
             
         except Exception as e:
-            print(f"❌ Error calculating ML score: {e}")
-            logger.error(f"Error calculating ML score: {str(e)}")
+            logger.error(f"Error calculating ML score: {str(e)}", exc_info=True)
             return 50.0  # Always return a float, never None
 
     def _calculate_entropy_score(self, telemetry: Dict[str, Any]) -> float:
@@ -243,25 +242,72 @@ class Engine:
         self._cache.clear()
         logger.debug("Cache cleared")
   
+    def _format_explanation(self, telemetry: Dict[str, Any], result: Dict[str, Any],
+                            feature_deviations: Optional[Dict[str, float]] = None) -> str:
+        """Format a human-readable explanation for a scoring result.
+        See docs/EXPLAINABILITY.md for the full specification.
+        """
+        device_id = telemetry.get("device_id", "unknown")
+        verdict = result["verdict"]
+        trust = result["trust_score"]
+        ml = result["ml_score"]
+        rule = result["rule_score"]
+        entropy = result["entropy_score"]
+        confidence = result["confidence"]
+
+        lines = [
+            f"[{verdict}] Device: {device_id} | Trust: {trust:.1f}/100 | Confidence: {confidence:.1f}%",
+            f"  Breakdown: ML={ml:.1f} (x0.70={ml*0.7:.1f}) | Rule={rule} (x0.20={rule*0.2:.1f}) | Entropy={entropy:.1f} (x0.10={entropy*0.1:.1f})",
+        ]
+
+        if result.get("risk_factors"):
+            lines.append(f"  Rules triggered: {', '.join(result['risk_factors'])}")
+
+        if result.get("top_features"):
+            feat_strs = []
+            for feat in result["top_features"]:
+                if feature_deviations and feat in feature_deviations:
+                    feat_strs.append(f"{feat} ({feature_deviations[feat]:+.1f} sigma)")
+                else:
+                    feat_strs.append(feat)
+            lines.append(f"  Top features: {', '.join(feat_strs)}")
+
+        return " | ".join(lines) if verdict == "NORMAL" else "\n".join(lines)
+
     def score_telemetry(self, telemetry: Dict[str, Any]) -> Dict[str, Any]:
-        """Score a single telemetry record and return comprehensive results
+        """Score a single telemetry record and return comprehensive results.
+
         Uses metadata-driven feature extraction with safe defaults for missing
         fields, computes entropy/confidence, and adds explanation fields.
+
+        Returns a dict containing:
+            trust_score     (float 0-100): Overall trust. Higher = more trustworthy.
+            ml_score        (float 0-100): ML anomaly score. Higher = more anomalous.
+            rule_score      (float 0-100): Heuristic rule penalty sum.
+            entropy_score   (float 0-100): Entropy-based risk. Low entropy = high score.
+            confidence      (float 0-100): Confidence that traffic is normal.
+            verdict         (str): NORMAL | SUSPICIOUS | RISKY | ANOMALY
+            risk_factors    (list[str]): Names of triggered heuristic rules.
+            top_features    (list[str]): Top 3 features by deviation from training mean.
+            risk_score_breakdown (dict): Individual sub-score components.
+            from_cache      (bool): Whether result was served from cache.
+
+        Scoring formula:
+            risk  = 0.70 * ml_score + 0.20 * rule_score + 0.10 * entropy_score
+            trust = 100 - risk
+        See docs/EXPLAINABILITY.md for detailed worked examples.
         """
-        print(f"🔧 Engine.score_telemetry called with: {telemetry}")
-        print(f"🔧 Engine loaded: {self._loaded}, model: {self.model is not None}, scaler: {self.scaler is not None}")
-        if self.feature_names:
-            print(f"🔧 Feature names: {self.feature_names[:5]}... (total: {len(self.feature_names)})")
-    
+        logger.debug(f"Scoring telemetry for device={telemetry.get('device_id', 'unknown')}")
+
         try:
             # Check cache first for repeated similar requests
             cache_key = self._get_cache_key(telemetry)
             if cache_key in self._cache:
                 cached_result = self._cache[cache_key].copy()
                 cached_result["from_cache"] = True
-                print(f"✅ Returning cached result")
+                logger.debug("Returning cached result")
                 return cached_result
-    
+
             rule_score, risk_factors = self._calculate_rule_score(telemetry)
             ml_score = self._calculate_ml_score(telemetry)
             entropy_score = self._calculate_entropy_score(telemetry)
@@ -276,6 +322,7 @@ class Engine:
 
             # compute top features by deviation from mean (using scaler)
             top_feats = []
+            feature_deviations = {}
             try:
                 features_df = self._extract_features(telemetry)
                 if self.scaler is not None:
@@ -284,8 +331,11 @@ class Engine:
                     # pick top 3 features
                     idxs = np.argsort(abs_vals)[::-1][:3]
                     top_feats = [self.feature_names[i] for i in idxs]
+                    # record deviation magnitudes for explainability
+                    for i in idxs:
+                        feature_deviations[self.feature_names[i]] = float(scaled[i])
             except Exception as e:
-                print(f"⚠️ Error computing top features: {e}")
+                logger.debug(f"Error computing top features: {e}")
                 top_feats = []
 
             result = {
@@ -319,15 +369,19 @@ class Engine:
             self._cache[cache_key] = result.copy()
             result["from_cache"] = False
 
-            print(f"✅ Engine scoring successful: {result}")
-            logger.debug(f"Scored telemetry: {result}")
+            # Structured explainability logging
+            explanation = self._format_explanation(telemetry, result, feature_deviations)
+            if result["verdict"] in ("ANOMALY", "RISKY"):
+                logger.warning(f"ALERT: {explanation}")
+            elif result["verdict"] == "SUSPICIOUS":
+                logger.info(f"WATCH: {explanation}")
+            else:
+                logger.debug(f"OK: {explanation}")
+
             return result
 
         except Exception as e:
-            print(f"❌ Error in score_telemetry: {e}")
-            import traceback
-            traceback.print_exc()
-            logger.error(f"Error scoring telemetry: {str(e)}")
+            logger.error(f"Error scoring telemetry: {str(e)}", exc_info=True)
             # Return a default result instead of None
             return {
                 "trust_score": 50.0,

@@ -149,25 +149,24 @@ class ConnectionManager:
     async def broadcast(self, message: Dict[str, Any]):
         """Broadcast message to all connected clients."""
         if not self.active_connections:
-            print("📭 No active connections to broadcast to")
+            logger.debug("No active WebSocket connections to broadcast to")
             return
             
         disconnected = []
         async with self._lock:
-            print(f"📢 Broadcasting to {len(self.active_connections)} clients")
+            logger.debug(f"Broadcasting to {len(self.active_connections)} clients")
             for i, connection in enumerate(self.active_connections):
                 try:
                     await connection.send_json(message)
-                    print(f"  ✅ Sent to client {i+1}")
                 except Exception as e:
-                    print(f"  ❌ Failed to send to client {i+1}: {e}")
+                    logger.warning(f"Failed to send to client {i+1}: {e}")
                     disconnected.append(connection)
             
             # Clean up disconnected clients
             for conn in disconnected:
                 if conn in self.active_connections:
                     self.active_connections.remove(conn)
-                    print(f"  Removed disconnected client")
+                    logger.info("Removed disconnected WebSocket client")
 
     async def close_all(self):
         """Close active websocket connections during shutdown."""
