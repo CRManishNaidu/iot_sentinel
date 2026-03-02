@@ -1,0 +1,30 @@
+{
+  "n_features": 21,
+  "feature_names": [
+    "duration",
+    "orig_bytes",
+    "resp_bytes",
+    "orig_pkts",
+    "resp_pkts",
+    "bytes_per_second",
+    "packet_ratio",
+    "proto_icmp",
+    "proto_tcp",
+    "proto_udp",
+    "conn_state_OTH",
+    "conn_state_REJ",
+    "conn_state_RSTO",
+    "conn_state_RSTOS0",
+    "conn_state_RSTR",
+    "conn_state_RSTRH",
+    "conn_state_S0",
+    "conn_state_S1",
+    "conn_state_S2",
+    "conn_state_SF",
+    "conn_state_SH"
+  ],
+  "contamination": 0.01,
+  "n_estimators": 150,
+  "training_samples": 1009200,
+  "anomaly_ratio_training": 0.009907847800237813
+}

@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+streamlit
+streamlit-autorefresh
+pandas
+numpy
+scikit-learn
+joblib
+plotly
+matplotlib
+seaborn
+requests
+websocket-client
