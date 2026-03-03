@@ -1,4 +1,4 @@
-# IoT Sentinel - Enterprise IoT Anomaly Detection System
+# IoT Sentinel -  Enterprise IoT Anomaly Detection System
 
 A production-grade, real-time network intrusion detection system for IoT device fleets using unsupervised machine learning (Isolation Forest), heuristic rule engines, and entropy-based traffic analysis.
 
