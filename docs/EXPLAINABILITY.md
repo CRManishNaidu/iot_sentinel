@@ -22,6 +22,15 @@ Every call to `engine.score_telemetry()` returns a result dictionary containing 
     "verdict": "ANOMALY",
     "risk_factors": ["High origin bytes", "High packet count"],
     "top_features": ["orig_bytes", "bytes_per_second", "packet_ratio"],
+    "explanation_method": "shap_approximation",
+    "top_contributors": [
+        {"feature": "orig_bytes", "impact": 8.2, "direction": "increase_risk"}
+    ],
+    "drift_analysis": {
+        "detector": "adwin_lite",
+        "drift_detected": false,
+        "drift_score": 0.84
+    },
     "risk_score_breakdown": {
         "ml_score": 78.32,
         "rule_score": 50,
@@ -43,6 +52,9 @@ Every call to `engine.score_telemetry()` returns a result dictionary containing 
 | `verdict` | string | Human-readable classification: NORMAL, SUSPICIOUS, RISKY, ANOMALY. |
 | `risk_factors` | list[string] | Names of all triggered heuristic rules. Directly explains which rules contributed. |
 | `top_features` | list[string] | Top 3 features with the largest absolute deviation from training mean (via scaler). Shows which specific measurements drove the ML decision. |
+| `explanation_method` | string | Explainer type used for local feature attribution, e.g. `shap_approximation`. |
+| `top_contributors` | list[object] | SHAP-style local contributors ordered by impact magnitude. |
+| `drift_analysis` | dict | ADWIN-based drift signal that tracks score distribution changes over time. |
 | `risk_score_breakdown` | dict | Individual component scores for transparency into the weighted combination. |
 
 ---

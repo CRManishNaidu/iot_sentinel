@@ -137,14 +137,14 @@ echo All components started!
 echo ========================================
 echo.
 echo 📍 FastAPI Server: http://localhost:8000
-echo 📍 FastAPI Docs: http://localhost:8000/docs
+echo 📍 FastAPI Docs: http://localhost:8000/api/docs
 echo 📍 Streamlit Dashboard: http://localhost:8501
 echo.
 echo Project location: %PROJECT_ROOT%
 echo.
 echo Opening FastAPI docs in browser...
 timeout /t 2 > nul
-start http://localhost:8000/docs
+start http://localhost:8000/api/docs
 
 echo Opening Streamlit dashboard in browser...
 timeout /t 2 > nul

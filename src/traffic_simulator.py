@@ -52,16 +52,19 @@ API_KEY = os.getenv("API_KEY", "hackathon-secret")
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 4
 
+
 # ──────────────────────────── ANSI colours ────────────────────────────────
 class C:
     """ANSI colour helpers for console output."""
-    GREEN  = "\033[92m"
-    RED    = "\033[91m"
+
+    GREEN = "\033[92m"
+    RED = "\033[91m"
     YELLOW = "\033[93m"
-    CYAN   = "\033[96m"
-    BOLD   = "\033[1m"
-    DIM    = "\033[2m"
-    RESET  = "\033[0m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  DEVICE TYPE DEFINITIONS
@@ -69,7 +72,7 @@ class C:
 
 DEVICE_TYPES = {
     "ip_camera": {
-        "icon": "\U0001f4f9",       # 📹
+        "icon": "\U0001f4f9",  # 📹
         "label": "IP Camera",
         "patterns": {
             "video_stream": {
@@ -105,7 +108,7 @@ DEVICE_TYPES = {
         },
     },
     "smart_thermostat": {
-        "icon": "\U0001f321\uFE0F",  # 🌡️
+        "icon": "\U0001f321\ufe0f",  # 🌡️
         "label": "Smart Thermostat",
         "patterns": {
             "temp_report": {
@@ -141,7 +144,7 @@ DEVICE_TYPES = {
         },
     },
     "smart_speaker": {
-        "icon": "\U0001f50a",        # 🔊
+        "icon": "\U0001f50a",  # 🔊
         "label": "Smart Speaker",
         "patterns": {
             "voice_command": {
@@ -177,7 +180,7 @@ DEVICE_TYPES = {
         },
     },
     "smart_plug": {
-        "icon": "\U0001f50c",        # 🔌
+        "icon": "\U0001f50c",  # 🔌
         "label": "Smart Plug",
         "patterns": {
             "power_report": {
@@ -213,7 +216,7 @@ DEVICE_TYPES = {
         },
     },
     "smart_lock": {
-        "icon": "\U0001f512",        # 🔒
+        "icon": "\U0001f512",  # 🔒
         "label": "Smart Lock",
         "patterns": {
             "lock_unlock_event": {
@@ -249,7 +252,7 @@ DEVICE_TYPES = {
         },
     },
     "smart_light": {
-        "icon": "\U0001f4a1",        # 💡
+        "icon": "\U0001f4a1",  # 💡
         "label": "Smart Light Bulb",
         "patterns": {
             "status_update": {
@@ -426,6 +429,7 @@ BACKGROUND_NOISE = [
 #  DEVICE  CLASS
 # ══════════════════════════════════════════════════════════════════════════
 
+
 class IoTDevice:
     """Represents a single IoT device with its own RNG seed."""
 
@@ -448,17 +452,22 @@ class IoTDevice:
     # ── anomaly traffic ───────────────────────────────────────────────
     def generate_anomaly(self) -> Tuple[Dict, str]:
         anomaly = self.rng.choice(ANOMALY_TYPES)
-        payload = self._build_payload(anomaly["profile"], anomaly["name"], is_anomaly=True)
+        payload = self._build_payload(
+            anomaly["profile"], anomaly["name"], is_anomaly=True
+        )
         return payload, anomaly["name"]
 
     # ── background noise ──────────────────────────────────────────────
     def generate_noise(self) -> Dict:
         noise = self.rng.choice(BACKGROUND_NOISE)
-        return self._build_payload(noise, noise["name"], is_anomaly=False, is_noise=True)
+        return self._build_payload(
+            noise, noise["name"], is_anomaly=False, is_noise=True
+        )
 
     # ── internal builder ──────────────────────────────────────────────
-    def _build_payload(self, profile: Dict, pattern_name: str,
-                       is_anomaly: bool, is_noise: bool = False) -> Dict:
+    def _build_payload(
+        self, profile: Dict, pattern_name: str, is_anomaly: bool, is_noise: bool = False
+    ) -> Dict:
         payload = {
             "duration": round(self.rng.uniform(*profile["duration"]), 3),
             "orig_bytes": round(self.rng.uniform(*profile["orig_bytes"]), 2),
@@ -496,19 +505,46 @@ def _random_high_entropy_domain(rng: random.Random) -> str:
     sub = "".join(rng.choice(chars) for _ in range(rng.randint(16, 32)))
     return f"{sub}.evil-c2.xyz"
 
+
 # ══════════════════════════════════════════════════════════════════════════
 #  SIMULATOR  CORE
 # ══════════════════════════════════════════════════════════════════════════
+
 
 class EnhancedTrafficSimulator:
     """Generates realistic IoT traffic and optionally scores it via API."""
 
     DEVICE_TYPE_LIST = list(DEVICE_TYPES.keys())
 
-    def __init__(self, mode: str = "mixed", interval: float = 2.0,
-                 device_count: int = 6, seed: int = 42):
+    MODE_PRESETS = {
+        "demo": {"base_mode": "mixed", "interval": 2.0, "anomaly_probability": 0.15},
+        "test": {"base_mode": "mixed", "interval": 1.0, "anomaly_probability": 0.25},
+        "stress": {"base_mode": "mixed", "interval": 0.5, "anomaly_probability": 0.40},
+        "normal": {"base_mode": "normal", "interval": None, "anomaly_probability": 0.0},
+        "anomaly": {
+            "base_mode": "anomaly",
+            "interval": None,
+            "anomaly_probability": 1.0,
+        },
+        "mixed": {"base_mode": "mixed", "interval": None, "anomaly_probability": 0.18},
+    }
+
+    def __init__(
+        self,
+        mode: str = "mixed",
+        interval: float = 2.0,
+        device_count: int = 6,
+        seed: int = 42,
+    ):
+        preset = self.MODE_PRESETS.get(mode, self.MODE_PRESETS["mixed"])
         self.mode = mode
-        self.interval = interval
+        self.base_mode = preset["base_mode"]
+        self.interval = (
+            interval
+            if interval != 2.0 or preset["interval"] is None
+            else preset["interval"]
+        )
+        self.anomaly_probability = preset["anomaly_probability"]
         self.device_count = min(device_count, len(self.DEVICE_TYPE_LIST) * 3)
         self.seed = seed
         random.seed(seed)
@@ -531,9 +567,13 @@ class EnhancedTrafficSimulator:
     # ── HTTP session ──────────────────────────────────────────────────
     def _build_session(self) -> requests.Session:
         s = requests.Session()
-        retry = Retry(total=3, backoff_factor=0.5,
-                      status_forcelist=[429, 500, 502, 503, 504],
-                      allowed_methods={"POST"}, raise_on_status=False)
+        retry = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods={"POST"},
+            raise_on_status=False,
+        )
         adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
         s.mount("http://", adapter)
         s.mount("https://", adapter)
@@ -547,13 +587,13 @@ class EnhancedTrafficSimulator:
         if random.random() < 0.10:
             return device.generate_noise()
 
-        if self.mode == "normal":
+        if self.base_mode == "normal":
             return device.generate_normal()
-        elif self.mode == "anomaly":
+        elif self.base_mode == "anomaly":
             payload, _ = device.generate_anomaly()
             return payload
         else:  # mixed
-            if random.random() < 0.18:  # ~18 % anomaly rate
+            if random.random() < self.anomaly_probability:
                 payload, _ = device.generate_anomaly()
                 return payload
             return device.generate_normal()
@@ -565,8 +605,9 @@ class EnhancedTrafficSimulator:
         api_payload = {k: v for k, v in payload.items() if not k.startswith("_")}
         headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
         try:
-            resp = self.session.post(API_URL, json=api_payload,
-                                     headers=headers, timeout=REQUEST_TIMEOUT)
+            resp = self.session.post(
+                API_URL, json=api_payload, headers=headers, timeout=REQUEST_TIMEOUT
+            )
             if resp.status_code == 200:
                 return resp.json()
             elif resp.status_code == 403:
@@ -603,7 +644,9 @@ class EnhancedTrafficSimulator:
         # entropy display for DNS tunneling
         entropy_str = ""
         if pattern == "dns_tunneling":
-            domain = _random_high_entropy_domain(random.Random(hash(dev_id + str(self.total_events))))
+            domain = _random_high_entropy_domain(
+                random.Random(hash(dev_id + str(self.total_events)))
+            )
             ent = _compute_entropy(domain)
             entropy_str = f" | entropy={ent:.2f} [{domain[:30]}]"
 
@@ -632,7 +675,9 @@ class EnhancedTrafficSimulator:
 
     # ── periodic summary ──────────────────────────────────────────────
     def _print_summary(self):
-        rate = (self.anomaly_count / self.total_events * 100) if self.total_events else 0
+        rate = (
+            (self.anomaly_count / self.total_events * 100) if self.total_events else 0
+        )
         print(
             f"\n{C.CYAN}{C.BOLD}"
             f"{'═' * 70}\n"
@@ -693,7 +738,9 @@ class EnhancedTrafficSimulator:
 
     # ── final stats ───────────────────────────────────────────────────
     def _print_final(self):
-        rate = (self.anomaly_count / self.total_events * 100) if self.total_events else 0
+        rate = (
+            (self.anomaly_count / self.total_events * 100) if self.total_events else 0
+        )
         print(f"\n{C.CYAN}{C.BOLD}{'═' * 70}")
         print(f"  🛑  SIMULATION COMPLETE")
         print(f"{'═' * 70}{C.RESET}")
@@ -708,25 +755,34 @@ class EnhancedTrafficSimulator:
 #  CLI
 # ══════════════════════════════════════════════════════════════════════════
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="IoT Sentinel — Enhanced Hackathon Traffic Simulator"
     )
     parser.add_argument(
-        "--mode", choices=["normal", "anomaly", "mixed"], default="mixed",
-        help="Traffic mode (default: mixed)"
+        "--mode",
+        choices=["normal", "anomaly", "mixed", "demo", "test", "stress"],
+        default="mixed",
+        help="Traffic mode preset (normal/anomaly/mixed/demo/test/stress)",
     )
     parser.add_argument(
-        "--interval", type=float, default=2.0,
-        help="Seconds between events (default: 2.0)"
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Seconds between events (default: 2.0)",
     )
     parser.add_argument(
-        "--device-count", type=int, default=6,
-        help="Number of IoT devices to simulate (default: 6)"
+        "--device-count",
+        type=int,
+        default=6,
+        help="Number of IoT devices to simulate (default: 6)",
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed for reproducibility (default: 42)"
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)",
     )
     return parser.parse_args()
 

@@ -2,6 +2,8 @@
 
 A production-grade, real-time network intrusion detection system for IoT device fleets using unsupervised machine learning (Isolation Forest), heuristic rule engines, and entropy-based traffic analysis.
 
+Recent upgrades include ADWIN-style drift monitoring, SHAP-like feature contribution summaries, API-key protected scoring, Docker deployment, and a richer multi-device traffic simulator.
+
 ## Quick Start
 
 ```bash
@@ -50,6 +52,8 @@ python src/traffic_simulator.py                  # Traffic simulator
 | API Server | FastAPI + Uvicorn |
 | Real-time | WebSocket broadcasting |
 | Dashboard | Streamlit + Plotly |
+| Drift Monitoring | ADWIN / ADWIN-lite |
+| Local Explanations | SHAP-style feature contributions |
 | Data Format | Zeek/Bro conn.log (CTU-IoT-23 dataset) |
 
 ---
@@ -116,3 +120,13 @@ start_all.bat
 | GET | /metrics/json | JSON metrics |
 | WS | /ws | Real-time score broadcasts |
 | GET | /api/docs | Swagger documentation |
+
+## Security
+
+- `/score` requires `X-API-Key`
+- Default local development value is stored in `.env` as `API_KEY=hackathon-secret`
+
+## Explainability And Drift
+
+- Each score response now includes `top_contributors`, `explanation_method`, `drift_detected`, and `drift_score`
+- Drift monitoring uses `river` ADWIN when available and automatically falls back to an internal ADWIN-lite detector

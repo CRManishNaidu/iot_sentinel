@@ -1,14 +1,131 @@
-from functools import lru_cache
 import joblib
 import json
 import logging
 import os
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Optional
+from collections import deque
+from typing import Dict, List, Any, Optional, Tuple
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+try:
+    from river.drift import ADWIN as RiverADWIN
+except ImportError:
+    RiverADWIN = None
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
+
+
+class ADWINLite:
+    """Lightweight ADWIN-inspired detector used when `river` is unavailable."""
+
+    def __init__(
+        self, delta: float = 0.002, min_window: int = 24, max_window: int = 128
+    ):
+        self.delta = delta
+        self.min_window = min_window
+        self.window = deque(maxlen=max_window)
+        self.last_stats = {
+            "window_size": 0,
+            "baseline_mean": 0.0,
+            "recent_mean": 0.0,
+            "mean_shift": 0.0,
+            "drift_score": 0.0,
+        }
+
+    def update(self, value: float) -> bool:
+        self.window.append(float(value))
+        if len(self.window) < self.min_window:
+            self.last_stats.update(
+                {
+                    "window_size": len(self.window),
+                    "baseline_mean": float(np.mean(self.window))
+                    if self.window
+                    else 0.0,
+                    "recent_mean": float(np.mean(self.window)) if self.window else 0.0,
+                    "mean_shift": 0.0,
+                    "drift_score": 0.0,
+                }
+            )
+            return False
+
+        values = np.array(self.window, dtype=float)
+        midpoint = len(values) // 2
+        baseline = values[:midpoint]
+        recent = values[midpoint:]
+        baseline_mean = float(np.mean(baseline))
+        recent_mean = float(np.mean(recent))
+        mean_shift = recent_mean - baseline_mean
+        pooled_std = float(np.std(values) + 1e-6)
+        drift_score = abs(mean_shift) / pooled_std
+        threshold = max(1.35, (-np.log10(self.delta + 1e-9)) * 0.5)
+        detected = drift_score >= threshold
+
+        self.last_stats.update(
+            {
+                "window_size": len(values),
+                "baseline_mean": baseline_mean,
+                "recent_mean": recent_mean,
+                "mean_shift": mean_shift,
+                "drift_score": drift_score,
+            }
+        )
+
+        if detected:
+            self.window = deque(recent.tolist(), maxlen=self.window.maxlen)
+
+        return detected
+
+
+class DriftMonitor:
+    """ADWIN wrapper with a deterministic fallback implementation."""
+
+    def __init__(self, delta: float = 0.002):
+        self.delta = delta
+        self.detector = (
+            RiverADWIN(delta=delta) if RiverADWIN else ADWINLite(delta=delta)
+        )
+        self.method = "river_adwin" if RiverADWIN else "adwin_lite"
+        self.drift_count = 0
+        self.last_detected = False
+        self.last_stats = {
+            "window_size": 0,
+            "baseline_mean": 0.0,
+            "recent_mean": 0.0,
+            "mean_shift": 0.0,
+            "drift_score": 0.0,
+        }
+
+    def update(self, value: float) -> Dict[str, Any]:
+        if RiverADWIN:
+            self.detector.update(float(value))
+            self.last_detected = bool(getattr(self.detector, "drift_detected", False))
+            estimation = float(getattr(self.detector, "estimation", value))
+            width = int(getattr(self.detector, "width", 0))
+            self.last_stats = {
+                "window_size": width,
+                "baseline_mean": estimation,
+                "recent_mean": estimation,
+                "mean_shift": 0.0,
+                "drift_score": 1.0 if self.last_detected else 0.0,
+            }
+        else:
+            self.last_detected = self.detector.update(float(value))
+            self.last_stats = dict(self.detector.last_stats)
+
+        if self.last_detected:
+            self.drift_count += 1
+
+        return {
+            "enabled": True,
+            "detector": self.method,
+            "drift_detected": self.last_detected,
+            "drift_count": self.drift_count,
+            **self.last_stats,
+        }
+
 
 class Engine:
     def __init__(self, models_path: str = "models"):
@@ -19,13 +136,34 @@ class Engine:
         self._loaded = False
         self._warmed_up = False
         self._cache = {}  # Simple cache for repeated calculations
+        self.drift_monitor = DriftMonitor(delta=0.002)
 
         # simple rule set, unchanged from before
         self.risk_rules = {
-            "high_orig_bytes": {"condition": lambda x: float(x.get("orig_bytes", 0)) > 10000, "points": 30, "name": "High origin bytes"},
-            "high_packet_counts": {"condition": lambda x: (float(x.get("orig_pkts", 0)) + float(x.get("resp_pkts", 0))) > 100, "points": 20, "name": "High packet count"},
-            "icmp_protocol": {"condition": lambda x: str(x.get("proto", "")).upper() == "ICMP", "points": 15, "name": "ICMP protocol"},
-            "failed_connection": {"condition": lambda x: str(x.get("conn_state", "")) in ["REJ", "RST", "REJECT", "RESET"], "points": 25, "name": "Failed connection"}
+            "high_orig_bytes": {
+                "condition": lambda x: float(x.get("orig_bytes", 0)) > 10000,
+                "points": 30,
+                "name": "High origin bytes",
+            },
+            "high_packet_counts": {
+                "condition": lambda x: (
+                    (float(x.get("orig_pkts", 0)) + float(x.get("resp_pkts", 0))) > 100
+                ),
+                "points": 20,
+                "name": "High packet count",
+            },
+            "icmp_protocol": {
+                "condition": lambda x: str(x.get("proto", "")).upper() == "ICMP",
+                "points": 15,
+                "name": "ICMP protocol",
+            },
+            "failed_connection": {
+                "condition": lambda x: (
+                    str(x.get("conn_state", "")) in ["REJ", "RST", "REJECT", "RESET"]
+                ),
+                "points": 25,
+                "name": "Failed connection",
+            },
         }
 
         self._load_artifacts()
@@ -33,39 +171,41 @@ class Engine:
         # perform a warmup inference if we successfully loaded features
         if self._loaded:
             self._perform_warmup()
-    
+
     def _load_artifacts(self):
         """Load model, scaler and metadata"""
         try:
             model_path = os.path.join(self.models_path, "isolation_forest.pkl")
             scaler_path = os.path.join(self.models_path, "scaler.pkl")
             metadata_path = os.path.join(self.models_path, "metadata.json")
-            
+
             if os.path.exists(model_path):
                 self.model = joblib.load(model_path)
                 logger.info(f"Model loaded from {model_path}")
             else:
                 logger.warning(f"Model not found at {model_path}")
-            
+
             if os.path.exists(scaler_path):
                 self.scaler = joblib.load(scaler_path)
                 logger.info(f"Scaler loaded from {scaler_path}")
             else:
                 logger.warning(f"Scaler not found at {scaler_path}")
-            
+
             if os.path.exists(metadata_path):
-                with open(metadata_path, 'r') as f:
+                with open(metadata_path, "r") as f:
                     metadata = json.load(f)
                     self.feature_names = metadata.get("feature_names", [])
-                logger.info(f"Metadata loaded from {metadata_path}, {len(self.feature_names)} features")
+                logger.info(
+                    f"Metadata loaded from {metadata_path}, {len(self.feature_names)} features"
+                )
                 self._loaded = True
             else:
                 logger.warning(f"Metadata not found at {metadata_path}")
-                
+
         except Exception as e:
             logger.error(f"Error loading artifacts: {str(e)}")
             raise
-    
+
     def _safe_float(self, value: Any) -> float:
         """Safely convert any value to float, defaulting to 0 on failure"""
         if value is None:
@@ -76,17 +216,17 @@ class Engine:
             return float(str(value).strip()) if str(value).strip() else 0.0
         except (ValueError, TypeError):
             return 0.0
-    
+
     def _extract_features(self, telemetry: Dict[str, Any]) -> pd.DataFrame:
         """Extract and scale features from telemetry data using metadata feature names"""
         if not self.feature_names:
             raise ValueError("No feature names available from metadata")
-        
+
         feature_dict = {}
         proto_val = str(telemetry.get("proto", "")).upper()
         conn_state_val = str(telemetry.get("conn_state", ""))
         missing_features = []
-        
+
         for feature in self.feature_names:
             if feature in telemetry:
                 feature_dict[feature] = self._safe_float(telemetry[feature])
@@ -99,12 +239,12 @@ class Engine:
             else:
                 feature_dict[feature] = 0.0
                 missing_features.append(feature)
-        
+
         if missing_features and len(missing_features) < len(self.feature_names):
             logger.debug(
                 f"Filled {len(missing_features)} missing features with 0: {missing_features[:5]}"
             )
-        
+
         features_df = pd.DataFrame([feature_dict])
 
         try:
@@ -118,12 +258,12 @@ class Engine:
             features_df = rebuilt
 
         return features_df
-    
+
     def _calculate_rule_score(self, telemetry: Dict[str, Any]) -> tuple:
         """Calculate rule-based score (higher = more risky) and return score and triggered rules"""
         total_points = 0
         triggered_rules = []
-        
+
         for rule_key, rule_config in self.risk_rules.items():
             try:
                 if rule_config["condition"](telemetry):
@@ -131,10 +271,10 @@ class Engine:
                     triggered_rules.append(rule_config["name"])
             except Exception as e:
                 logger.debug(f"Error evaluating rule {rule_key}: {str(e)}")
-        
+
         rule_score = min(100, total_points)
         return rule_score, triggered_rules
-    
+
     def _sigmoid(self, x: float) -> float:
         """Sigmoid function"""
         if x >= 0:
@@ -142,31 +282,33 @@ class Engine:
         else:
             exp_x = np.exp(x)
             return exp_x / (1.0 + exp_x)
-    
+
     def _calculate_ml_score(self, telemetry: Dict[str, Any]) -> float:
         """Calculate ML-based anomaly score (0-100, higher = more anomalous)"""
         if self.model is None or self.scaler is None or not self._loaded:
             logger.debug("Model or scaler not available, returning neutral score")
             return 50.0
-        
+
         try:
             if not hasattr(self.model, "decision_function"):
                 logger.error("Model does not have decision_function method")
                 return 50.0
-            
+
             if self.scaler.n_features_in_ != len(self.feature_names):
-                raise ValueError(f"Feature mismatch: scaler expects {self.scaler.n_features_in_} features, metadata has {len(self.feature_names)}")
-            
+                raise ValueError(
+                    f"Feature mismatch: scaler expects {self.scaler.n_features_in_} features, metadata has {len(self.feature_names)}"
+                )
+
             features_df = self._extract_features(telemetry)
             scaled_features = self.scaler.transform(features_df)
-            
+
             decision_score = self.model.decision_function(scaled_features)[0]
-            
+
             sigmoid_score = self._sigmoid(-decision_score)
             ml_score = sigmoid_score * 100.0
-            
+
             return float(np.clip(ml_score, 0, 100))
-            
+
         except Exception as e:
             logger.error(f"Error calculating ML score: {str(e)}", exc_info=True)
             return 50.0  # Always return a float, never None
@@ -192,7 +334,9 @@ class Engine:
         entropy_score = (1.0 - normalized) * 100.0
         return float(np.clip(entropy_score, 0, 100))
 
-    def _calculate_confidence(self, ml_score: float, rule_score: float, entropy_score: float) -> float:
+    def _calculate_confidence(
+        self, ml_score: float, rule_score: float, entropy_score: float
+    ) -> float:
         """Blend multiple scores into a single confidence metric (0-100).
         Higher value indicates the engine is more confident that the input is
         normal (i.e. inversely related to combined risk).
@@ -201,16 +345,51 @@ class Engine:
         confidence = 100.0 - combined_risk
         return float(np.clip(confidence, 0, 100))
 
+    def _get_shap_like_explanation(
+        self, telemetry: Dict[str, Any]
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Return feature contributions in a SHAP-like format for local explanations."""
+        if not self.feature_names or self.scaler is None:
+            return "shap_unavailable", []
+
+        try:
+            features_df = self._extract_features(telemetry)
+            scaled = self.scaler.transform(features_df)[0]
+            contributions = []
+            for idx, feature_name in enumerate(self.feature_names):
+                raw_value = float(features_df.iloc[0, idx])
+                normalized_impact = float(abs(scaled[idx]))
+                signed_impact = float(scaled[idx])
+                contributions.append(
+                    {
+                        "feature": feature_name,
+                        "value": round(raw_value, 4),
+                        "impact": round(normalized_impact, 4),
+                        "direction": "increase_risk"
+                        if signed_impact >= 0
+                        else "decrease_risk",
+                        "signed_impact": round(signed_impact, 4),
+                    }
+                )
+
+            contributions.sort(key=lambda item: item["impact"], reverse=True)
+            return "shap_approximation", contributions[:5]
+        except Exception as e:
+            logger.debug(f"Unable to compute SHAP-like explanation: {e}")
+            return "shap_unavailable", []
+
     def _get_cache_key(self, telemetry: Dict[str, Any]) -> str:
         """Generate a cache key from telemetry data"""
         # Use a subset of fields for caching to avoid too many unique keys
         cache_fields = {
-            'proto': telemetry.get('proto', ''),
-            'conn_state': telemetry.get('conn_state', ''),
-            'orig_bytes': round(self._safe_float(telemetry.get('orig_bytes', 0)), -1),  # Round to nearest 10
-            'resp_bytes': round(self._safe_float(telemetry.get('resp_bytes', 0)), -1),
-            'orig_pkts': round(self._safe_float(telemetry.get('orig_pkts', 0)), -1),
-            'resp_pkts': round(self._safe_float(telemetry.get('resp_pkts', 0)), -1)
+            "proto": telemetry.get("proto", ""),
+            "conn_state": telemetry.get("conn_state", ""),
+            "orig_bytes": round(
+                self._safe_float(telemetry.get("orig_bytes", 0)), -1
+            ),  # Round to nearest 10
+            "resp_bytes": round(self._safe_float(telemetry.get("resp_bytes", 0)), -1),
+            "orig_pkts": round(self._safe_float(telemetry.get("orig_pkts", 0)), -1),
+            "resp_pkts": round(self._safe_float(telemetry.get("resp_pkts", 0)), -1),
         }
         return str(sorted(cache_fields.items()))
 
@@ -227,7 +406,7 @@ class Engine:
             "resp_pkts": 10,
             "proto": "TCP",
             "conn_state": "SF",
-            "device_id": "warmup"
+            "device_id": "warmup",
         }
         try:
             _ = self.score_telemetry(dummy)
@@ -236,14 +415,18 @@ class Engine:
             logger.debug(f"Warmup inference failed: {e}")
         finally:
             self._warmed_up = True
-    
+
     def _clear_cache(self):
         """Clear the internal cache"""
         self._cache.clear()
         logger.debug("Cache cleared")
-  
-    def _format_explanation(self, telemetry: Dict[str, Any], result: Dict[str, Any],
-                            feature_deviations: Optional[Dict[str, float]] = None) -> str:
+
+    def _format_explanation(
+        self,
+        telemetry: Dict[str, Any],
+        result: Dict[str, Any],
+        feature_deviations: Optional[Dict[str, float]] = None,
+    ) -> str:
         """Format a human-readable explanation for a scoring result.
         See docs/EXPLAINABILITY.md for the full specification.
         """
@@ -257,7 +440,7 @@ class Engine:
 
         lines = [
             f"[{verdict}] Device: {device_id} | Trust: {trust:.1f}/100 | Confidence: {confidence:.1f}%",
-            f"  Breakdown: ML={ml:.1f} (x0.70={ml*0.7:.1f}) | Rule={rule} (x0.20={rule*0.2:.1f}) | Entropy={entropy:.1f} (x0.10={entropy*0.1:.1f})",
+            f"  Breakdown: ML={ml:.1f} (x0.70={ml * 0.7:.1f}) | Rule={rule} (x0.20={rule * 0.2:.1f}) | Entropy={entropy:.1f} (x0.10={entropy * 0.1:.1f})",
         ]
 
         if result.get("risk_factors"):
@@ -297,7 +480,9 @@ class Engine:
             trust = 100 - risk
         See docs/EXPLAINABILITY.md for detailed worked examples.
         """
-        logger.debug(f"Scoring telemetry for device={telemetry.get('device_id', 'unknown')}")
+        logger.debug(
+            f"Scoring telemetry for device={telemetry.get('device_id', 'unknown')}"
+        )
 
         try:
             # Check cache first for repeated similar requests
@@ -319,6 +504,9 @@ class Engine:
             trust_score = 100.0 - risk_score
 
             confidence = self._calculate_confidence(ml_score, rule_score, entropy_score)
+            explanation_method, top_contributors = self._get_shap_like_explanation(
+                telemetry
+            )
 
             # compute top features by deviation from mean (using scaler)
             top_feats = []
@@ -338,6 +526,8 @@ class Engine:
                 logger.debug(f"Error computing top features: {e}")
                 top_feats = []
 
+            drift_analysis = self.drift_monitor.update(risk_score)
+
             result = {
                 "trust_score": round(trust_score, 2),
                 "rule_score": rule_score,
@@ -346,11 +536,14 @@ class Engine:
                 "confidence": round(confidence, 2),
                 "risk_factors": risk_factors,
                 "top_features": top_feats,
+                "explanation_method": explanation_method,
+                "top_contributors": top_contributors,
+                "drift_analysis": drift_analysis,
                 "risk_score_breakdown": {
                     "ml_score": round(ml_score, 2),
                     "rule_score": rule_score,
-                    "entropy_score": round(entropy_score, 2)
-                }
+                    "entropy_score": round(entropy_score, 2),
+                },
             }
 
             if trust_score > 70:
@@ -370,7 +563,9 @@ class Engine:
             result["from_cache"] = False
 
             # Structured explainability logging
-            explanation = self._format_explanation(telemetry, result, feature_deviations)
+            explanation = self._format_explanation(
+                telemetry, result, feature_deviations
+            )
             if result["verdict"] in ("ANOMALY", "RISKY"):
                 logger.warning(f"ALERT: {explanation}")
             elif result["verdict"] == "SUSPICIOUS":
@@ -391,15 +586,30 @@ class Engine:
                 "confidence": 50.0,
                 "risk_factors": ["Error in processing"],
                 "top_features": [],
+                "explanation_method": "shap_unavailable",
+                "top_contributors": [],
+                "drift_analysis": {
+                    "enabled": True,
+                    "detector": self.drift_monitor.method,
+                    "drift_detected": False,
+                    "drift_count": getattr(self.drift_monitor, "drift_count", 0),
+                    "window_size": 0,
+                    "baseline_mean": 0.0,
+                    "recent_mean": 0.0,
+                    "mean_shift": 0.0,
+                    "drift_score": 0.0,
+                },
                 "risk_score_breakdown": {
                     "ml_score": 50.0,
                     "rule_score": 0,
-                    "entropy_score": 50.0
+                    "entropy_score": 50.0,
                 },
-                "verdict": "UNCERTAIN"
+                "verdict": "UNCERTAIN",
             }
 
+
 _engine_instance = None
+
 
 def load_engine(models_path: str = "models") -> Engine:
     """Factory function to create and return an Engine instance (singleton)"""
@@ -407,6 +617,7 @@ def load_engine(models_path: str = "models") -> Engine:
     if _engine_instance is None:
         _engine_instance = Engine(models_path)
     return _engine_instance
+
 
 def score_telemetry(telemetry_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Convenience function for scoring telemetry with default engine"""
