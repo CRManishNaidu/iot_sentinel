@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────
+# IoT Sentinel — Streamlit Dashboard
+# ─────────────────────────────────────────────────
+FROM python:3.11-slim
+
+LABEL maintainer="Team Rocket"
+LABEL description="IoT Sentinel Dashboard – Streamlit SOC UI"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Install dependencies first (layer caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application source
+COPY src/ ./src/
+
+# Default env vars for dashboard
+ENV API_URL=http://api:8000 \
+    WS_URL=ws://api:8000/ws
+
+EXPOSE 8501
+
+# Health check – Streamlit serves on 8501
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import requests; r=requests.get('http://localhost:8501/_stcore/health'); exit(0 if r.status_code==200 else 1)" || exit 1
+
+CMD ["python", "-m", "streamlit", "run", "src/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

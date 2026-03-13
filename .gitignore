@@ -1,0 +1,50 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data files - ignore large datasets but keep folder structure
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/README.md
+
+data/processed/*
+!data/processed/.gitkeep
+
+# Model files (large binaries)
+models/*.pkl
+models/*.h5
+models/*.pt
+models/*.pth
+models/*.joblib
+models/*.onnx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+
+# Logs
+logs/
+*.log
